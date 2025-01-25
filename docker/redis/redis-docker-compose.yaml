@@ -1,0 +1,12 @@
+version: '3'
+services:
+  redis-server:
+    image: redis:latest
+    container_name: redis-proxy
+    command: [ "redis-proxy", "/usr/local/etc/redis/redis.conf", "--aclfile", "/usr/local/etc/redis/aclfile" ]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+      - ./aclfile:/usr/local/etc/redis/aclfile
+    restart: always
