@@ -4,7 +4,7 @@ Cloud-Native Redis Proxy for Serverless and Multi-Tenant Environments
 
 ## Overview
 
-Elika Proxy is a sophisticated middleware solution that not only forwards Redis commands but serves as a comprehensive
+Elika (Elika is pronounced as Eh-li-ka) Proxy is a sophisticated middleware solution that not only forwards Redis commands but serves as a comprehensive
 management layer for Redis clusters in cloud-native environments. Built with multi-tenancy in mind, it provides a
 unified entry point for multiple Redis clusters while offering advanced capabilities for cluster management, scaling,
 and monitoring.
