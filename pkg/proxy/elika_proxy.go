@@ -6,6 +6,7 @@ import (
 	"github.com/panjf2000/gnet/v2"
 	"github.com/pzhenzhou/elika/pkg/be_cluster"
 	"github.com/pzhenzhou/elika/pkg/common"
+	"github.com/pzhenzhou/elika/pkg/metrics"
 	"github.com/pzhenzhou/elika/pkg/respio"
 	"io"
 	"strings"
@@ -30,9 +31,10 @@ var (
 
 type ElikaProxyServer struct {
 	gnet.BuiltinEventEngine
-	eng        *gnet.Engine
-	config     *common.ProxyConfig
-	sessionMgr *be_cluster.SessionManager
+	eng               *gnet.Engine
+	config            *common.ProxyConfig
+	sessionMgr        *be_cluster.SessionManager
+	metricsMiddleware *metrics.ProxyMetricsMiddleWare
 }
 
 func NewElikaProxy(config *common.ProxyConfig) *ElikaProxyServer {
@@ -41,6 +43,10 @@ func NewElikaProxy(config *common.ProxyConfig) *ElikaProxyServer {
 		sessionMgr: be_cluster.NewSessionManager(config),
 	}
 	return proxySrv
+}
+
+func (p *ElikaProxyServer) SetMetricsMiddleware(middleware *metrics.ProxyMetricsMiddleWare) {
+	p.metricsMiddleware = middleware
 }
 
 func (p *ElikaProxyServer) Start() error {
@@ -69,7 +75,7 @@ func (p *ElikaProxyServer) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) 
 	return nil, gnet.None
 }
 
-func (p *ElikaProxyServer) forward(id string, session *be_cluster.Session, authInfo *common.AuthInfo, packet *respio.RespPacket) error {
+func (p *ElikaProxyServer) doForward(id string, session *be_cluster.Session, authInfo *common.AuthInfo, packet *respio.RespPacket) error {
 	if err := p.sessionMgr.Forward(id, packet, authInfo); err != nil {
 		return session.WriteAndFlush(&respio.RespPacket{
 			Type: respio.RespError,
@@ -79,7 +85,16 @@ func (p *ElikaProxyServer) forward(id string, session *be_cluster.Session, authI
 	return nil
 }
 
-func (p *ElikaProxyServer) dispatch(client *be_cluster.Session, packet *respio.RespPacket) error {
+func (p *ElikaProxyServer) forward(id string, session *be_cluster.Session, authInfo *common.AuthInfo, packet *respio.RespPacket) error {
+	if p.metricsMiddleware != nil {
+		return p.metricsMiddleware.WrapForwarding(packet, func() error {
+			return p.doForward(id, session, authInfo, packet)
+		})
+	}
+	return p.doForward(id, session, authInfo, packet)
+}
+
+func (p *ElikaProxyServer) doDispatch(client *be_cluster.Session, packet *respio.RespPacket) error {
 	var authInfo *common.AuthInfo
 	if client.IsAuthenticated() {
 		authInfo = client.GetAuthInfo()
@@ -101,6 +116,15 @@ func (p *ElikaProxyServer) dispatch(client *be_cluster.Session, packet *respio.R
 	return p.forward(client.Id, client, authInfo, authPacket)
 }
 
+func (p *ElikaProxyServer) dispatch(client *be_cluster.Session, packet *respio.RespPacket) error {
+	if p.metricsMiddleware != nil {
+		return p.metricsMiddleware.WrapDispatch(packet, func() error {
+			return p.doDispatch(client, packet)
+		})
+	}
+	return p.doDispatch(client, packet)
+}
+
 // OnTraffic We model connection lifecycle in two phases: AUTH and Command
 // Client          Proxy          Backend
 //
@@ -119,6 +143,15 @@ func (p *ElikaProxyServer) dispatch(client *be_cluster.Session, packet *respio.R
 func (p *ElikaProxyServer) OnTraffic(c gnet.Conn) gnet.Action {
 	connId := c.RemoteAddr().String()
 	client := p.sessionMgr.LoadSession(connId)
+	if p.metricsMiddleware != nil {
+		return p.metricsMiddleware.WrapTraffic(func() gnet.Action {
+			return p.onEvent(client)
+		})
+	}
+	return p.onEvent(client)
+}
+
+func (p *ElikaProxyServer) onEvent(client *be_cluster.Session) gnet.Action {
 	for {
 		packet, err := client.Read()
 		if err != nil {

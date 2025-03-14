@@ -69,6 +69,12 @@ type NodeConfig struct {
 	Namespace string `help:"Namespace for the node" name:"namespace" default:"default"`
 }
 
+type MetricsConfig struct {
+	EnableMetrics   bool   `help:"Enable metrics collection" name:"enable" default:"false"`
+	MetricsPath     string `help:"Metrics path" name:"path" default:"/metrics"`
+	MetricsSinkType string `help:"Metrics sink type. support prometheus and memory." name:"sink" default:"prometheus"`
+}
+
 type ProxyConfig struct {
 	ProxyPort             int                 `help:"ProxyPort for the proxy proxy" name:"port" default:"6378"`
 	ServicePort           int                 `help:"ServicePort for the proxy proxy. Port shared by the http and GRPC." name:"service-port" default:"7080"`
@@ -80,6 +86,7 @@ type ProxyConfig struct {
 	Router                BackendRouterConfig `embed:"" prefix:"router."`
 	WebServer             WebServerConfig     `embed:"" prefix:"web-proxy."`
 	Node                  NodeConfig          `embed:"" prefix:"node."`
+	Metrics               MetricsConfig       `embed:"" prefix:"metrics."`
 }
 
 func (c *ProxyConfig) ServiceListener() net.Listener {
