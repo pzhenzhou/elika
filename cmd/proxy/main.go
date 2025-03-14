@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/alecthomas/kong"
 	"github.com/pzhenzhou/elika/pkg/common"
+	"github.com/pzhenzhou/elika/pkg/metrics"
 	"github.com/pzhenzhou/elika/pkg/proxy"
 	"github.com/pzhenzhou/elika/pkg/web_service"
 	cmux2 "github.com/soheilhy/cmux"
@@ -35,6 +36,25 @@ func SetupAllServer() {
 
 	httpSrv := web_service.NewWebServer(&proxyCfg)
 	proxySrv := proxy.NewElikaProxy(&proxyCfg)
+
+	if proxyCfg.Metrics.EnableMetrics {
+		metricsConfig := metrics.DefaultConfig()
+		if proxyCfg.Metrics.MetricsSinkType == "prometheus" {
+			metricsConfig.ExposeSink = metrics.PrometheusSink
+		} else if proxyCfg.Metrics.MetricsSinkType == "memory" {
+			metricsConfig.ExposeSink = metrics.InMemorySink
+		} else if proxyCfg.Metrics.MetricsSinkType == "all" {
+			metricsConfig.ExposeSink = metrics.AllMetricsSink
+		}
+		metricsCollector, err := metrics.NewMetricsCollector(metricsConfig)
+		if err == nil {
+			metricsMiddleware := metrics.NewProxyMetricsMiddleware(metricsCollector)
+			proxySrv.SetMetricsMiddleware(metricsMiddleware)
+			httpSrv.SetMetricHandler(metrics.ExposeMetricURL, metricsCollector)
+		} else {
+			logger.Error(err, "Failed to create metrics collector")
+		}
+	}
 
 	signChan := make(chan os.Signal, 1)
 	signal.Notify(signChan, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM)

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pzhenzhou/elika/pkg/be_cluster"
 	"github.com/pzhenzhou/elika/pkg/common"
+	"github.com/pzhenzhou/elika/pkg/metrics"
 	"github.com/samber/lo"
 	"github.com/soheilhy/cmux"
 	"net/http"
@@ -143,6 +144,10 @@ func (s *WebServer) Shutdown(ctx context.Context) {
 			logger.Info("Proxy WebServer stopped.")
 		}
 	}
+}
+
+func (s *WebServer) SetMetricHandler(metricsPath string, collector metrics.ProxyMetricsCollector) {
+	s.r.GET(metricsPath, collector.Handler())
 }
 
 func (s *WebServer) registerHandler(handler WebHandler) {
