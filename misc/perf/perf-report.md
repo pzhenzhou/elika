@@ -10,11 +10,11 @@ connections, even when the backend database is constrained to < 500 mCPU.
 
 ### Test Environment
 
-| Component                     |          vCPU / Memory | Instance type | Notes                                           |
-|-------------------------------|-----------------------:|---------------|-------------------------------------------------|
-| **Proxy**                     |         2 vCPU / 2 GiB | `c5.2xlarge`  | Multiplexing & pooling enabled                  |
-| **Redis-compatible KV store** | **< 500 mCPU** / 2 GiB | `i4i.xlarge`  | CPU-constrained—dominant source of base latency |
-| **memtier\_benchmark client** |         4 vCPU / 1 GiB | `c5.2xlarge`  | Acts as workload generator                      |
+| Component                     |        vCPU / Memory | Instance type | Notes                                           |
+|-------------------------------|---------------------:|---------------|-------------------------------------------------|
+| **Proxy**                     |       2 vCPU / 2 GiB | `c5.2xlarge`  | Multiplexing & pooling enabled                  |
+| **Redis-compatible KV store** | **250m CPU** / 2 GiB | `i4i.xlarge`  | CPU-constrained—dominant source of base latency |
+| **memtier\_benchmark client** |       4 vCPU / 1 GiB | `c5.2xlarge`  | Acts as workload generator                      |
 
 Workload tool memtier_benchmark
 
