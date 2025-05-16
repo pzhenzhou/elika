@@ -1,10 +1,14 @@
 package be_cluster
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"golang.org/x/sys/unix"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/lithammer/shortuuid/v4"
@@ -13,9 +17,7 @@ import (
 )
 
 const (
-	KvPortName = "kv-port"
-
-	DefaultQueueSize = 1024
+	DefaultQueueSize = 128
 )
 
 type TxState struct {
@@ -39,36 +41,61 @@ type BackendConn struct {
 	// A typical pattern is a FIFO structure that you push new request.
 	pendingQ chan *RequestContext
 	// writeQ:  The commands that need to conn forwarded to backend.
-	writeQ   chan *RequestContext
-	quit     chan struct{}
-	txState  *TxState
-	authInfo atomic.Value
-	closed   atomic.Bool
-	created  time.Time
-	usedAt   int64
-	txLock   sync.RWMutex
-	wg       sync.WaitGroup
+	writeQ  chan *RequestContext
+	quit    chan struct{}
+	txState *TxState
+	closed  atomic.Bool
+	created time.Time
+	usedAt  int64
+	txLock  sync.RWMutex
+	wg      sync.WaitGroup
+	// instanceId field to track which backend instance this connection belongs to
+	instanceId string
 }
 
-func NewBackendConn(timeout time.Duration, addr string) (*BackendConn, error) {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+func NewBackendConn(timeout time.Duration, addr string, queueSize int) (*BackendConn, error) {
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: func(network, address string, c syscall.RawConn) error {
+			var ctrlErr error
+			err := c.Control(func(fd uintptr) {
+				// Set SO_REUSEADDR to avoid "address already in use" errors
+				if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+					ctrlErr = fmt.Errorf("failed to set SO_REUSEADDR: %w", err)
+					logger.Error(ctrlErr, "Failed to set SO_REUSEADDR")
+					return
+				}
+				// Optionally set SO_REUSEPORT (if available on your platform)
+				if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+					ctrlErr = fmt.Errorf("failed to set SO_REUSEPORT: %w", err)
+					logger.Error(ctrlErr, "Failed to set SO_REUSEPORT")
+					return
+				}
+			})
+			if err != nil {
+				return err
+			}
+			return ctrlErr
+		},
+	}
+	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		logger.Error(err, "Failed to new backend", "Addr", addr)
 		return nil, err
 	}
 	serverConn := &BackendConn{
-		Id:       shortuuid.New(),
-		created:  time.Now(),
-		conn:     conn,
-		authInfo: atomic.Value{},
-		reader:   respio.NewRespReader(conn),
-		writer:   respio.NewRespWriter(conn),
-		writeQ:   make(chan *RequestContext, DefaultQueueSize),
-		quit:     make(chan struct{}, 1),
-		pendingQ: make(chan *RequestContext, DefaultQueueSize),
-		wg:       sync.WaitGroup{},
-		txLock:   sync.RWMutex{},
-		closed:   atomic.Bool{},
+		Id:         shortuuid.New(),
+		created:    time.Now(),
+		conn:       conn,
+		reader:     respio.NewRespReader(conn),
+		writer:     respio.NewRespWriter(conn),
+		writeQ:     make(chan *RequestContext, queueSize),
+		quit:       make(chan struct{}, 2),
+		pendingQ:   make(chan *RequestContext, queueSize),
+		wg:         sync.WaitGroup{},
+		txLock:     sync.RWMutex{},
+		instanceId: addr,
+		closed:     atomic.Bool{},
 	}
 	serverConn.wg.Add(2)
 	serverConn.start()
@@ -92,17 +119,18 @@ func (bc *BackendConn) drainWriteQ() {
 				return
 			}
 			if err := bc.WriteAndFlush(pCtx.Request); err != nil {
+				errorPacket := respio.AcquireRespPacket()
+				errorPacket.Type = respio.RespError
+				errorPacket.Data = []byte(err.Error())
+
 				pCtx.Session.OutQ <- &ResponseContext{
-					Response: &respio.RespPacket{
-						Type: respio.RespError,
-						Data: []byte(err.Error()),
-					},
+					Response: errorPacket,
 				}
 				continue
 			}
 			bc.pendingQ <- pCtx
 		default:
-			logger.Info("WriteQ is empty")
+			// logger.Info("WriteQ is empty")
 			return
 		}
 	}
@@ -128,7 +156,7 @@ func (bc *BackendConn) drainPendingQ() {
 				Response: packet,
 			}
 		default:
-			logger.Info("PendingQ is empty")
+			// logger.Info("PendingQ is empty")
 			return
 		}
 	}
@@ -140,6 +168,8 @@ func (bc *BackendConn) WriteAndFlush(pkt *respio.RespPacket) error {
 		logger.Error(err, "BackendConn Failed to write packet")
 		return err
 	}
+	//logger.Info("BackendConn WriteAndFlush flush complete.",
+	//	"packet", pkt, "Id", bc.Id, "FlushErr", flushErr)
 	return bc.writer.Flush()
 }
 
@@ -161,11 +191,19 @@ func (bc *BackendConn) WriteLoop() {
 			if !ok {
 				return
 			}
+			// logger.Info("BackendConn WriteLoop packet", "packet", pCtx.Request, "Id", bc.Id)
 			if err := bc.WriteAndFlush(pCtx.Request); err != nil {
 				logger.Error(err, "BackendConn Failed to write packet")
 				pCtx.Session.OutQ <- NewErrResponseContext(err)
+				if common.IsBackendUnavailable(err) {
+					logger.Info("BackendConn WriteLoop connection closed", "error", err)
+					bc.Clear()
+					return
+				}
 				continue
 			}
+			//logger.Info("BackendConn WriteLoop write complete", "packet",
+			//	pCtx.Request, "Id", bc.Id)
 			bc.pendingQ <- pCtx
 		}
 	}
@@ -182,13 +220,13 @@ func (bc *BackendConn) ReadLoop() {
 			logger.Info("BackendConn ReadLoop quit")
 			return
 		default:
-			// TODO : add ReadTimeout connection closed.
 			packet, err := bc.reader.Read()
+			// logger.Info("BackendConn ReadLoop packet", "packet", packet, "Id", bc.Id)
 			if err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					logger.Info("BackendConn ReadLoop connection closed")
-				} else {
-					logger.Error(err, "BackendConn Failed to read packet")
+				if common.IsBackendUnavailable(err) {
+					logger.Info("BackendConn ReadLoop connection closed", "error", err)
+					bc.Clear()
+					return
 				}
 				continue
 			}
@@ -196,47 +234,32 @@ func (bc *BackendConn) ReadLoop() {
 			rspCtx := &ResponseContext{
 				Response: packet,
 			}
-			isAuthenticated := bc.IsAuthenticated()
-			if !isAuthenticated {
-				// logger.Info("BackendConn not authenticated", "BackendId", bc.Id, "ClintId", pCtx.Session.Id)
-				authInfo := pCtx.AuthInfo
-				if pCtx.Request.IsAuthCmd() {
-					if packet.Type == respio.RespStatus && string(packet.Data) == "OK" {
-						bc.SetAuthInfo(authInfo)
-					}
-				}
-				rspCtx.Callback = func(session *Session) {
-					session.SetAuthInfo(authInfo)
-				}
-			} else {
-				if !pCtx.Session.IsAuthenticated() {
-					if packet.Type == respio.RespStatus && string(packet.Data) == "OK" {
-						rspCtx.Callback = func(session *Session) {
-							session.SetAuthInfo(bc.LoadAuthInfo())
+			// Safely check if session has auth info with password
+			authInfo := pCtx.Session.GetAuthInfo()
+			if authInfo != nil && authInfo.Password == nil {
+				// Update the complete auth info in the session
+				// This preserves the username set earlier but adds the password
+				// The username is needed for routing, the password for re-authentication
+				if pCtx.Request.IsAuthCmd() && packet.Type == respio.RespStatus &&
+					bytes.Equal(packet.Data, respio.OkCmd) {
+					rspCtx.Callback = func(session *Session) {
+						existingAuthInfo := session.GetAuthInfo()
+						if existingAuthInfo != nil {
+							session.SetAuthInfo(&common.AuthInfo{
+								Username: existingAuthInfo.Username,
+								Password: pCtx.AuthInfo.Password,
+							})
+						} else {
+							session.SetAuthInfo(pCtx.AuthInfo)
 						}
 					}
+				} else if pCtx.Request.IsAuthCmd() {
+					// auth failed
+					logger.Info("BackendConn ReadLoop auth failed", "packet", packet, "Id", bc.Id)
 				}
 			}
 			pCtx.Session.OutQ <- rspCtx
 		}
-	}
-}
-
-func (bc *BackendConn) LoadAuthInfo() *common.AuthInfo {
-	if info := bc.authInfo.Load(); info != nil {
-		return info.(*common.AuthInfo)
-	} else {
-		return nil
-	}
-}
-
-func (bc *BackendConn) IsAuthenticated() bool {
-	return bc.authInfo.Load() != nil
-}
-
-func (bc *BackendConn) SetAuthInfo(info *common.AuthInfo) {
-	if info != nil {
-		bc.authInfo.Store(info)
 	}
 }
 
@@ -265,14 +288,17 @@ func (bc *BackendConn) drainQueues() {
 }
 
 func (bc *BackendConn) Clear() {
-	close(bc.quit)
-	bc.closed.Store(true)
-	bc.drainQueues()
+	if !bc.closed.Swap(true) {
+		close(bc.quit)
+		bc.drainQueues()
+		bc.innerClose()
+	}
 }
 
 func (bc *BackendConn) innerClose() {
 	if bc.conn != nil {
-		_ = bc.conn.Close()
+		closeErr := bc.conn.Close()
+		logger.Info("BackendConn connection closed", "connId", bc.Id, "error", closeErr)
 	}
 }
 
@@ -282,24 +308,21 @@ func (bc *BackendConn) Close() error {
 	done := make(chan struct{})
 	go func() {
 		bc.wg.Wait()
-		logger.Info("BackendConn goroutines shutdown completed", "connId", bc.Id)
 		done <- struct{}{}
 	}()
-
-	defer bc.innerClose()
 	select {
 	case <-done:
 		logger.Info("BackendConn shutdown completed", "connId", bc.Id)
 		return nil
-	case <-time.After(2 * time.Second):
+	case <-time.After(1 * time.Second):
 		logger.Info("BackendConn shutdown timed out", "connId", bc.Id)
 		return nil
 	}
 }
 
 func (bc *BackendConn) UsedAt() time.Time {
-	unix := atomic.LoadInt64(&bc.usedAt)
-	return time.Unix(unix, 0)
+	sec := atomic.LoadInt64(&bc.usedAt)
+	return time.Unix(sec, 0)
 }
 
 func (bc *BackendConn) SetUsedAt(inTime time.Time) {
@@ -313,25 +336,38 @@ func (bc *BackendConn) RemoteAddr() net.Addr {
 	return nil
 }
 
-func (bc *BackendConn) EnsureAuth(authPacket *respio.RespPacket) (*respio.RespPacket, error) {
-	if !authPacket.IsAuthCmd() {
-		logger.Info("Not an AUTH command", "authPacket", authPacket)
-		return nil, ErrNotAuthCmd
+func (bc *BackendConn) EnsureAuth(authPacket *respio.RespPacket, sessionAuthInfo *common.AuthInfo) (*respio.RespPacket, error) {
+	// Create a channel for the response
+	responseCh := make(chan struct {
+		resp *respio.RespPacket
+		err  error
+	}, 1)
+	// Create a tmp session struct that will capture the response
+	authSession := &Session{
+		Id:   "auth_" + bc.Id,
+		OutQ: make(chan *ResponseContext, 1),
 	}
-	if bc.IsAuthenticated() {
-		return respio.OkStatus, nil
+	reqCtx := &RequestContext{
+		Session:  authSession,
+		Request:  authPacket,
+		AuthInfo: sessionAuthInfo,
 	}
-	// Write auth command
-	if err := bc.WriteAndFlush(authPacket); err != nil {
-		return nil, err
-	}
-	resp, err := bc.reader.Read()
-	if err != nil {
-		return nil, err
-	}
-	if resp.Type == respio.RespStatus && string(resp.Data) == "OK" {
-		authInfo := authPacket.ToAuthInfo()
-		bc.SetAuthInfo(authInfo)
-	}
-	return resp, nil
+	go func() {
+		select {
+		case rspCtx := <-authSession.OutQ:
+			resp := rspCtx.Response
+			responseCh <- struct {
+				resp *respio.RespPacket
+				err  error
+			}{resp, nil}
+		case <-time.After(500 * time.Millisecond):
+			responseCh <- struct {
+				resp *respio.RespPacket
+				err  error
+			}{nil, errors.New("authentication timeout")}
+		}
+	}()
+	bc.Enqueue(reqCtx)
+	result := <-responseCh
+	return result.resp, result.err
 }

@@ -9,7 +9,6 @@ import (
 	"github.com/pzhenzhou/elika/pkg/metrics"
 	"github.com/pzhenzhou/elika/pkg/respio"
 	"io"
-	"strings"
 )
 
 const (
@@ -71,7 +70,6 @@ func (p *ElikaProxyServer) OnBoot(eng gnet.Engine) gnet.Action {
 func (p *ElikaProxyServer) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
 	connId := c.RemoteAddr().String()
 	p.sessionMgr.OpenSession(connId, c)
-	// logger.Info("ElikaProxy opened connection", "connId", connId)
 	return nil, gnet.None
 }
 
@@ -95,24 +93,26 @@ func (p *ElikaProxyServer) forward(id string, session *be_cluster.Session, authI
 }
 
 func (p *ElikaProxyServer) doDispatch(client *be_cluster.Session, packet *respio.RespPacket) error {
-	var authInfo *common.AuthInfo
+	// If client is already authenticated, just forward the packet
 	if client.IsAuthenticated() {
-		authInfo = client.GetAuthInfo()
+		authInfo := client.GetAuthInfo()
 		return p.forward(client.Id, client, authInfo, packet)
 	}
+	// If not authenticated, check if this is an AUTH command
 	if !packet.IsAuthCmd() {
+		logger.Info("Client is not authenticated and sent a non-auth command",
+			"clientId", client.Id, "packet", packet)
 		return client.WriteAndFlush(respio.ErrNoAuth)
 	}
-	authInfo = packet.ToAuthInfo()
-	if authInfo.LoadTenantCode() == 0 {
-		return client.WriteAndFlush(respio.ErrAuthFailed)
+	// This is an AUTH command, extract auth info
+	authInfo := packet.ToAuthInfo()
+	if len(authInfo.Username) > 0 {
+		routingAuthInfo := &common.AuthInfo{
+			Username: authInfo.Username,
+		}
+		client.SetAuthInfo(routingAuthInfo)
 	}
-	var authPacket *respio.RespPacket
-	if strings.EqualFold(p.config.Router.RouterType, "sync") {
-		authPacket = respio.NewAuthPacket(nil, authInfo.Password)
-	} else {
-		authPacket = respio.NewAuthPacket(authInfo.Username, authInfo.Password)
-	}
+	authPacket := respio.NewAuthPacket(authInfo.Username, authInfo.Password)
 	return p.forward(client.Id, client, authInfo, authPacket)
 }
 

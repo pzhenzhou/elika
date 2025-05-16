@@ -2,14 +2,11 @@ package common
 
 import (
 	"bytes"
-	"strconv"
-	"sync/atomic"
 )
 
 type AuthInfo struct {
-	Username   []byte `json:"username,omitempty"`
-	Password   []byte `json:"password,omitempty"`
-	TenantCode uint64
+	Username []byte `json:"username,omitempty"`
+	Password []byte `json:"password,omitempty"`
 }
 
 func (a *AuthInfo) Equals(b *AuthInfo) bool {
@@ -17,9 +14,5 @@ func (a *AuthInfo) Equals(b *AuthInfo) bool {
 }
 
 func (a *AuthInfo) ToString() string {
-	return "Username: " + string(a.Username) + ", Password: " + string(a.Password) + ", TenantCode: " + strconv.FormatUint(a.TenantCode, 10)
-}
-
-func (a *AuthInfo) LoadTenantCode() uint64 {
-	return atomic.LoadUint64(&a.TenantCode)
+	return "Username: " + string(a.Username) + ", Password: " + string(a.Password)
 }

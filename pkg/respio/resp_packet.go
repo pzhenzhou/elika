@@ -3,37 +3,26 @@ package respio
 import (
 	"bytes"
 	"fmt"
-	"github.com/pzhenzhou/elika/pkg/common"
 	"strings"
+
+	"github.com/pzhenzhou/elika/pkg/common"
 )
 
 var (
-	logger = common.InitLogger().WithName("resp")
+	logger    = common.InitLogger().WithName("resp")
+	NilPacket *RespPacket
+	ErrNoAuth *RespPacket
+)
 
+func init() {
+	// Initialize global error packets
 	NilPacket = &RespPacket{Type: RespNil}
 
 	ErrNoAuth = &RespPacket{
 		Type: RespError,
 		Data: []byte("NOAUTH Authentication required"),
 	}
-
-	ErrAuthFailed = &RespPacket{
-		Type: RespError,
-		Data: []byte("WRONGPASS invalid username-password pair or user is disabled"),
-	}
-
-	ErrBackendUnavailable = &RespPacket{
-		Type: RespError,
-		Data: []byte("ERR backend is unavailable"),
-	}
-
-	ErrGetConnFromPool = &RespPacket{
-		Type: RespError,
-		Data: []byte("ERR can not get backend connection from pool"),
-	}
-
-	OkStatus = &RespPacket{Type: RespStatus, Data: []byte("OK")}
-)
+}
 
 type RespPacket struct {
 	Type  byte
@@ -159,17 +148,13 @@ func (p *RespPacket) ToAuthInfo() *common.AuthInfo {
 	} else {
 		authUser := authData[1].Data
 		idx := bytes.IndexByte(authUser, common.TenantKeySeparator)
-		var tenantKey []byte
 		username := authUser
 		if idx != -1 {
-			tenantKey = authUser[:idx]
 			username = authUser[idx+1:]
 		}
-		tenantCode, _ := common.DecodeBase62(string(tenantKey))
 		auth := &common.AuthInfo{
-			Username:   username,
-			Password:   authData[2].Data,
-			TenantCode: tenantCode,
+			Username: username,
+			Password: authData[2].Data,
 		}
 		return auth
 	}
@@ -188,20 +173,36 @@ func (p *RespPacket) IsTxCmd() ([]byte, TxCmdStateType, bool) {
 
 func NewAuthPacket(username, password []byte) *RespPacket {
 	if username == nil {
-		return &RespPacket{
-			Type: RespArray,
-			Array: []*RespPacket{
-				{Type: RespString, Data: AuthCmd},
-				{Type: RespString, Data: password},
-			},
-		}
+		packet := AcquireRespPacket()
+		packet.Type = RespArray
+
+		cmdPacket := AcquireRespPacket()
+		cmdPacket.Type = RespString
+		cmdPacket.Data = AuthCmd
+
+		passPacket := AcquireRespPacket()
+		passPacket.Type = RespString
+		passPacket.Data = password
+
+		packet.Array = append(packet.Array, cmdPacket, passPacket)
+		return packet
 	}
-	return &RespPacket{
-		Type: RespArray,
-		Array: []*RespPacket{
-			{Type: RespString, Data: AuthCmd},
-			{Type: RespString, Data: username},
-			{Type: RespString, Data: password},
-		},
-	}
+
+	packet := AcquireRespPacket()
+	packet.Type = RespArray
+
+	cmdPacket := AcquireRespPacket()
+	cmdPacket.Type = RespString
+	cmdPacket.Data = AuthCmd
+
+	userPacket := AcquireRespPacket()
+	userPacket.Type = RespString
+	userPacket.Data = username
+
+	passPacket := AcquireRespPacket()
+	passPacket.Type = RespString
+	passPacket.Data = password
+
+	packet.Array = append(packet.Array, cmdPacket, userPacket, passPacket)
+	return packet
 }

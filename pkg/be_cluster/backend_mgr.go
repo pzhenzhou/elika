@@ -18,7 +18,7 @@ type BackendManager struct {
 	balancerRef   Balancer
 	config        *common.ProxyConfig
 	instancePool  *xsync.MapOf[string, *FixedPool]
-	clusterKeyMap *xsync.MapOf[uint64, *ClusterKey]
+	clusterKeyMap *xsync.MapOf[string, *ClusterKey]
 }
 
 func GetBackendManager(config *common.ProxyConfig) *BackendManager {
@@ -28,7 +28,7 @@ func GetBackendManager(config *common.ProxyConfig) *BackendManager {
 			router:        NewBackendRouter(config),
 			balancerRef:   NewBalancer(GetBalancerType(&config.Router)),
 			instancePool:  xsync.NewMapOf[string, *FixedPool](),
-			clusterKeyMap: xsync.NewMapOf[uint64, *ClusterKey](),
+			clusterKeyMap: xsync.NewMapOf[string, *ClusterKey](),
 		}
 		mgr.PrepareCluster()
 	})
@@ -53,7 +53,7 @@ func (m *BackendManager) backendOnline(instance *ClusterInstance) {
 	tenantKeyStr := instance.EncodeClusterKey()
 	tenantCode, _ := common.DecodeBase62(tenantKeyStr)
 	logger.Info("ProxySrv BeMgr TenantKeyOnline", "TenantCode", tenantCode)
-	m.clusterKeyMap.Store(tenantCode, &instance.Key)
+	m.clusterKeyMap.Store(instance.Owner, &instance.Key)
 	poolCfg := NewFixedPoolCfgFromBackend(instance, m.config)
 	pool := NewFixedPool(poolCfg)
 	pool.WaitPoolReady()
@@ -75,26 +75,21 @@ func (m *BackendManager) PrepareCluster() {
 	}(m.router)
 }
 
-func (m *BackendManager) GetBackendFixedPool(authInfo *common.AuthInfo) (*FixedPool, error) {
-	tenantKey := m.GetTenantKey(authInfo)
+func (m *BackendManager) GetBackendFixedPool(userName string) (*FixedPool, error) {
+	tenantKey := m.GetTenantKey(userName)
 	if tenantKey == nil {
-		return nil, fmt.Errorf("no tenant key found for auth %+v", authInfo)
+		return nil, fmt.Errorf("no tenant key found for auth %+v", userName)
 	}
 	beInstance, _ := m.router.Selector(m.balancerRef, tenantKey)
 	pool, ok := m.instancePool.Load(beInstance.GetAddr())
 	if !ok {
-		return nil, fmt.Errorf("no backend avaiable for auth %+v", authInfo)
+		return nil, fmt.Errorf("no backend avaiable for auth %+v", userName)
 	}
 	return pool, nil
 }
 
-func (m *BackendManager) GetTenantKey(info *common.AuthInfo) *ClusterKey {
-	tenantCode := info.LoadTenantCode()
-	if tenantCode == 0 {
-		logger.Info("No tenant code found in auth info", "AuthInfo", info)
-		return nil
-	}
-	tk, ok := m.clusterKeyMap.Load(tenantCode)
+func (m *BackendManager) GetTenantKey(userName string) *ClusterKey {
+	tk, ok := m.clusterKeyMap.Load(userName)
 	if !ok {
 		return nil
 	}

@@ -5,14 +5,15 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/pzhenzhou/elika/pkg/common"
 	"io"
 	"net"
 	"strconv"
+
+	"github.com/pzhenzhou/elika/pkg/common"
 )
 
 const (
-	DefaultBufferSize = 8 * common.KB // 8KB
+	DefaultBufferSize = 64 * common.KB
 	MaxBufferSize     = 512 * common.MB
 )
 
@@ -52,14 +53,20 @@ func (r *RespReader) Read() (*RespPacket, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespStatus, Data: data}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespStatus
+		packet.Data = data
+		return packet, nil
 
 	case RespError: // Error
 		data, err := r.readLine()
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespError, Data: data}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespError
+		packet.Data = data
+		return packet, nil
 
 	case RespInt: // Integer
 		if err := r.reader.UnreadByte(); err != nil {
@@ -70,7 +77,10 @@ func (r *RespReader) Read() (*RespPacket, error) {
 			logger.Error(err, "RespInt Failed to read int")
 			return nil, err
 		}
-		return &RespPacket{Type: RespInt, Data: []byte(strconv.FormatInt(n, 10))}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespInt
+		packet.Data = []byte(strconv.FormatInt(n, 10))
+		return packet, nil
 
 	case RespString: // Bulk String
 		if err := r.reader.UnreadByte(); err != nil {
@@ -80,7 +90,10 @@ func (r *RespReader) Read() (*RespPacket, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespString, Data: data}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespString
+		packet.Data = data
+		return packet, nil
 
 	case RespNil:
 		// RESP3 Null
@@ -95,41 +108,50 @@ func (r *RespReader) Read() (*RespPacket, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespBool, Data: []byte(strconv.FormatBool(boolVal))}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespBool
+		packet.Data = []byte(strconv.FormatBool(boolVal))
+		return packet, nil
 	case RespFloat:
 		// RESP3 Double/Float
 		floatVal, err := r.ReadFloat()
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespFloat, Data: []byte(fmt.Sprintf("%g", floatVal))}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespFloat
+		packet.Data = []byte(fmt.Sprintf("%g", floatVal))
+		return packet, nil
 	case RespBigInt: // '('
 		// RESP3 Big integer
 		bigIntVal, err := r.ReadBigInt()
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespBigInt, Data: []byte(bigIntVal)}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespBigInt
+		packet.Data = []byte(bigIntVal)
+		return packet, nil
 	case RespVerbatim: // '='
 		// RESP3 Verbatim string
-		//	This is basically a bulk string with a "FORMAT:" prefix. For example:
-		//	  =15\r\ntxt:Some string\r\n
-		//	The first line after '=' is the length, same as a bulk string length
-		//	Then read that many bytes + CRLF, etc.
-		//	Unread the '=' so we can re-use your BulkReadString logic
-		//	(like we do with '$') or write a new function:
 		verbatimVal, err := r.ReadTypesWithMarker(RespVerbatim)
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespVerbatim, Data: verbatimVal}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespVerbatim
+		packet.Data = verbatimVal
+		return packet, nil
 	case RespBlobError: // '!'
 		// RESP3 Blob error
 		blobErr, err := r.ReadTypesWithMarker(RespBlobError)
 		if err != nil {
 			return nil, err
 		}
-		return &RespPacket{Type: RespBlobError, Data: blobErr}, nil
+		packet := AcquireRespPacket()
+		packet.Type = RespBlobError
+		packet.Data = blobErr
+		return packet, nil
 	case RespArray: // Array
 		return r.ReadArrayLike(b, RespArray, 1)
 	case RespPush: // '>'
@@ -145,7 +167,7 @@ func (r *RespReader) Read() (*RespPacket, error) {
 	case RespAttr: // '|'
 		return r.ReadArrayLike(b, RespAttr, 2)
 	default:
-		logger.Info("RespReader Invalid RESP type", "type", string(b))
+		// logger.Info("RespReader Invalid RESP type", "type", string(b))
 		return nil, ErrInvalidSyntax
 	}
 }
@@ -313,7 +335,7 @@ func (r *RespReader) ReadBool() (bool, error) {
 	default:
 		return false, ErrInvalidSyntax
 	}
-	// Next should cluster CRLF
+	// Next should conn CRLF
 	if err := r.skipCRLF(); err != nil {
 		return false, err
 	}
@@ -358,18 +380,32 @@ func (r *RespReader) ReadArrayLike(marker, respType byte, multiplier int) (*Resp
 	if err != nil {
 		return nil, err
 	}
+
+	packet := AcquireRespPacket()
+	packet.Type = respType
+
 	if length == -1 {
-		return &RespPacket{Type: respType}, nil
+		return packet, nil
 	}
+
 	// For maps and attributes, we need twice as many elements (key-value pairs)
 	numElements := length * multiplier
-	items := make([]*RespPacket, numElements)
+
+	// Ensure the array has enough capacity
+	if cap(packet.Array) < numElements {
+		packet.Array = make([]*RespPacket, 0, numElements)
+	}
+
+	// Read array elements
 	for i := 0; i < numElements; i++ {
 		elem, err := r.Read()
 		if err != nil {
+			// Make sure to release the packet if there's an error
+			ReleaseRespPacket(packet)
 			return nil, err
 		}
-		items[i] = elem
+		packet.Array = append(packet.Array, elem)
 	}
-	return &RespPacket{Type: respType, Array: items}, nil
+
+	return packet, nil
 }
