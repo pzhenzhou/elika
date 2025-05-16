@@ -148,16 +148,20 @@ func (w *RespWriter) WriteArray(array []*RespPacket) error {
 		return w.writeNullArray()
 	}
 	if err := w.writer.WriteByte(RespArray); err != nil {
+		logger.Error(err, "RespWriter WriteArray error", "Pkt", array)
 		return err
 	}
 	if _, err := w.writer.WriteString(strconv.Itoa(len(array))); err != nil {
+		logger.Error(err, "RespWriter WriteString error", "Pkt", array)
 		return err
 	}
 	if err := w.writeCRLF(); err != nil {
+		logger.Error(err, "RespWriter writeCRLF error", "Pkt", array)
 		return err
 	}
 	for _, paket := range array {
 		if err := w.Write(paket); err != nil {
+			logger.Error(err, "RespWriter Write error", "Pkt", paket)
 			return err
 		}
 	}

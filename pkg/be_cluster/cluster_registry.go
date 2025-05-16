@@ -102,6 +102,7 @@ type ClusterInstance struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	Endpoints []Endpoint        `json:"endpoints"`
 	Status    ClusterStatus     `json:"status"`
+	Owner     string            `json:"owner"`
 }
 
 func LocalClusterInstance(addr string, port int) *ClusterInstance {

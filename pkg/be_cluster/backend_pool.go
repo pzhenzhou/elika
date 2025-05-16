@@ -3,13 +3,13 @@ package be_cluster
 import (
 	"context"
 	"errors"
-	"github.com/cenkalti/backoff/v5"
-	"github.com/pzhenzhou/elika/pkg/common"
-	"github.com/pzhenzhou/elika/pkg/respio"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
+	"github.com/pzhenzhou/elika/pkg/common"
 )
 
 var (
@@ -81,7 +81,7 @@ func NewFixedPoolCfgFromBackend(instance *ClusterInstance, config *common.ProxyC
 		ConnMaxLifetime: 0,
 	}
 	cfg.Dialer = func(ctx context.Context) (*BackendConn, error) {
-		return NewBackendConn(3*time.Second, cfg.Addr)
+		return NewBackendConn(3*time.Second, cfg.Addr, 10240)
 	}
 	return cfg
 }
@@ -97,7 +97,7 @@ func NewDefaultPoolCfgFromBackend(instance *ClusterInstance, config *common.Prox
 		ConnMaxLifetime: 0,
 	}
 	cfg.Dialer = func(ctx context.Context) (*BackendConn, error) {
-		return NewBackendConn(3*time.Second, cfg.Addr)
+		return NewBackendConn(3*time.Second, cfg.Addr, 10240)
 	}
 	return cfg
 }
@@ -292,17 +292,16 @@ func (p *BackendPool) Get(ctx context.Context) (*BackendConn, error) {
 			p.freeSlot()
 			return nil, err
 		}
-		// not found idle cluster. create a new cluster
+		// not found idle conn. create a new conn
 		if conn == nil {
 			break
 		}
-		// cluster is not nil, check the cluster health, if the cluster is not healthy, close it and create a new cluster
+		// conn is not nil, check the conn health, if the conn is not healthy, close it and create a new conn
 		if !p.health(conn) {
 			_ = p.removeConnAndClose(conn)
 			continue
 		}
 		atomic.AddUint32(&p.status.ImmediateGets, 1)
-		connAuth(conn, p.LoadAuthInfo())
 		return conn, nil
 	}
 	atomic.AddUint32(&p.status.DelayedGets, 1)
@@ -310,14 +309,7 @@ func (p *BackendPool) Get(ctx context.Context) (*BackendConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	connAuth(newConn, p.LoadAuthInfo())
 	return newConn, nil
-}
-
-func connAuth(conn *BackendConn, authInfo *common.AuthInfo) {
-	if !conn.IsAuthenticated() && authInfo != nil {
-		_, _ = conn.EnsureAuth(respio.NewAuthPacket(authInfo.Username, authInfo.Password))
-	}
 }
 
 func (p *BackendPool) makeConn(ctx context.Context) (*BackendConn, error) {

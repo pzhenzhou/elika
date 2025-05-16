@@ -13,6 +13,7 @@ var (
 	WatchCmd   = []byte("watch")
 	ExecCmd    = []byte("exec")
 	DiscardCmd = []byte("discard")
+	OkCmd      = []byte("OK")
 )
 
 const (

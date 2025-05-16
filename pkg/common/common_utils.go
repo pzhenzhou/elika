@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/zapr"
@@ -8,9 +9,12 @@ import (
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"io"
 	"math/rand"
+	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -124,4 +128,33 @@ func SleepRandom(up, down int) {
 		time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 	}
 
+}
+
+func IsBackendUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for common connection closed errors
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		// Check for specific network errors
+		if netErr.Err != nil {
+			errMsg := netErr.Err.Error()
+			return strings.Contains(errMsg, "use of closed network connection") ||
+				strings.Contains(errMsg, "connection reset by peer") ||
+				strings.Contains(errMsg, "broken pipe") ||
+				strings.Contains(errMsg, "connection refused")
+		}
+		return netErr.Op == "read" || netErr.Op == "write" || netErr.Op == "dial"
+	}
+	var syscallErr *os.SyscallError
+	if errors.As(err, &syscallErr) {
+		return errors.Is(syscallErr.Err, syscall.ECONNREFUSED) ||
+			errors.Is(syscallErr.Err, syscall.ECONNRESET) ||
+			errors.Is(syscallErr.Err, syscall.EPIPE)
+	}
+	return false
 }

@@ -1,9 +1,10 @@
 package be_cluster
 
 import (
+	"net"
+
 	"github.com/pzhenzhou/elika/pkg/common"
 	"github.com/pzhenzhou/elika/pkg/respio"
-	"net"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -39,7 +40,7 @@ func (sm *SessionManager) RouteRequest(id string, authInfo *common.AuthInfo) (*S
 			}
 		}
 		// Re-routing needed
-		pool, loadErr := sm.beMgr.GetBackendFixedPool(authInfo)
+		pool, loadErr := sm.beMgr.GetBackendFixedPool(string(authInfo.Username))
 		if loadErr != nil {
 			logger.Info("Failed to route request", "SessionId", id, "Error", loadErr)
 			err = loadErr
@@ -106,7 +107,7 @@ func (sm *SessionManager) Forward(id string, packet *respio.RespPacket, authInfo
 }
 
 func (sm *SessionManager) OpenSession(id string, client net.Conn) {
-	session := NewSession(id, client)
+	session := NewSession(id, client, 10240)
 	go session.ReplyLoop()
 	sm.sessions.Store(id, &SessionPair{session: session})
 }

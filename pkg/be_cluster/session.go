@@ -1,11 +1,10 @@
 package be_cluster
 
 import (
-	"net"
-	"sync/atomic"
-
 	"github.com/pzhenzhou/elika/pkg/common"
 	"github.com/pzhenzhou/elika/pkg/respio"
+	"net"
+	"sync/atomic"
 )
 
 const (
@@ -46,12 +45,12 @@ type Session struct {
 	writer   *respio.RespWriter
 }
 
-func NewSession(Id string, client net.Conn) *Session {
+func NewSession(Id string, client net.Conn, queueSize int) *Session {
 	return &Session{
 		Id:     Id,
 		Client: client,
 		quit:   make(chan struct{}),
-		OutQ:   make(chan *ResponseContext, DefaultSessionOutQSize),
+		OutQ:   make(chan *ResponseContext, queueSize),
 		reader: respio.NewRespReader(client),
 		writer: respio.NewRespWriter(client),
 	}
@@ -68,6 +67,7 @@ func (s *Session) ReadBuffered() int {
 func (s *Session) WriteAndFlush(pkt *respio.RespPacket) error {
 	err := s.writer.Write(pkt)
 	if err != nil {
+		logger.Error(err, "Failed to write packet to client", "SessionId", s.Id)
 		return err
 	}
 	return s.writer.Flush()
@@ -77,22 +77,28 @@ func (s *Session) ReplyLoop() {
 	for {
 		select {
 		case <-s.quit:
+			// logger.Info("Session ReadLoop stop", "Id", s.Id)
 			return
 		case rspCtx := <-s.OutQ:
+			respPacket := rspCtx.Response
 			callback := rspCtx.Callback
 			if callback != nil {
-				// logger.Info("Executing callback", "SessionId", s.Id)
 				callback(s)
 			}
-			if err := s.WriteAndFlush(rspCtx.Response); err != nil {
+			if err := s.WriteAndFlush(respPacket); err != nil {
 				logger.Error(err, "Failed to write packet to client", "SessionId", s.Id)
+				// Release the packet even if there was an error writing it
+				respio.ReleaseRespPacket(respPacket)
 				continue
 			}
+			// Release the packet back to the pool after successfully writing it
+			respio.ReleaseRespPacket(respPacket)
 		}
 	}
 }
 
 func (s *Session) Close() {
+	logger.Info("Session close", "Id", s.Id)
 	select {
 	case <-s.quit: // Already closed
 		return
