@@ -21,15 +21,15 @@ const (
 )
 
 type TxState struct {
-	OwnerId string
-	State   respio.TxCmdStateType
+	TxBeginCmd   []byte
+	OwnerSession *Session
+	// OwnerId string
+	State respio.TxCmdStateType
 }
 
 var (
-	ErrNoEndpoint = errors.New("BackendConn: No endpoint found")
-	ErrNotAuthCmd = errors.New("BackendConn: Not an AUTH command")
-	logger        = common.InitLogger().WithName("backend")
-	drainTimeout  = 500 * time.Millisecond
+	logger       = common.InitLogger().WithName("backend")
+	drainTimeout = 500 * time.Millisecond
 )
 
 type BackendConn struct {
@@ -202,9 +202,10 @@ func (bc *BackendConn) WriteLoop() {
 				}
 				continue
 			}
-			//logger.Info("BackendConn WriteLoop write complete", "packet",
-			//	pCtx.Request, "Id", bc.Id)
-			bc.pendingQ <- pCtx
+			currTxState := bc.LoadTxnState()
+			if currTxState == nil {
+				bc.pendingQ <- pCtx
+			}
 		}
 	}
 }
@@ -230,6 +231,17 @@ func (bc *BackendConn) ReadLoop() {
 				}
 				continue
 			}
+			currTxState := bc.LoadTxnState()
+			if currTxState != nil && currTxState.OwnerSession != nil {
+				currTxState.OwnerSession.OutQ <- &ResponseContext{
+					Response: packet,
+				}
+				if currTxState.State == respio.TxCmdStateEnd {
+					bc.ClearTxnState()
+				}
+				continue
+			}
+
 			pCtx := <-bc.pendingQ
 			rspCtx := &ResponseContext{
 				Response: packet,
@@ -269,13 +281,19 @@ func (bc *BackendConn) LoadTxnState() *TxState {
 	return bc.txState
 }
 
-func (bc *BackendConn) UpdateTxnState(id string, stateType respio.TxCmdStateType) {
+func (bc *BackendConn) UpdateTxnState(session *Session, stateType respio.TxCmdStateType) {
 	bc.txLock.Lock()
 	defer bc.txLock.Unlock()
 	bc.txState = &TxState{
-		OwnerId: id,
-		State:   stateType,
+		OwnerSession: session,
+		State:        stateType,
 	}
+}
+
+func (bc *BackendConn) ClearTxnState() {
+	bc.txLock.Lock()
+	defer bc.txLock.Unlock()
+	bc.txState = nil
 }
 
 func (bc *BackendConn) Buffered() int {
