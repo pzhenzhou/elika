@@ -33,7 +33,7 @@ func (sm *SessionManager) RouteRequest(id string, authInfo *common.AuthInfo) (*S
 			bindBackendConn := oldValue.backend
 			if bindBackendConn != nil {
 				txState := bindBackendConn.LoadTxnState()
-				if txState == nil || txState.OwnerId == id {
+				if txState == nil || txState.OwnerSession != nil && txState.OwnerSession.Id == id {
 					// No re-routing needed
 					return oldValue, false
 				}
@@ -48,10 +48,10 @@ func (sm *SessionManager) RouteRequest(id string, authInfo *common.AuthInfo) (*S
 		}
 		backendConn, _ := pool.GetConnByKey([]byte(id))
 		txState := backendConn.LoadTxnState()
-		if txState != nil && txState.OwnerId != id {
+		if txState != nil && txState.OwnerSession.Id != id {
 			if !common.IsProdRuntime() {
 				logger.Info("Current backend cluster has been occupied by another session", "SessionId", id,
-					"OtherId", backendConn.LoadTxnState().OwnerId)
+					"OtherId", backendConn.LoadTxnState().OwnerSession.Id)
 			}
 			noTxConn, getTxConnErr := pool.GetNoTxConn()
 			if getTxConnErr != nil {
@@ -77,7 +77,7 @@ func (sm *SessionManager) Forward(id string, packet *respio.RespPacket, authInfo
 		needsRoute = true
 	} else {
 		txState := backendConn.LoadTxnState()
-		if txState != nil && txState.OwnerId != id {
+		if txState != nil && txState.OwnerSession != nil && txState.OwnerSession.Id != id {
 			needsRoute = true
 		}
 	}
@@ -87,16 +87,15 @@ func (sm *SessionManager) Forward(id string, packet *respio.RespPacket, authInfo
 			return err
 		}
 		sessionPair = newPair
+		backendConn = sessionPair.backend
 	}
 
 	// Update transaction state if needed
 	if _, state, ok := packet.IsTxCmd(); ok {
-		if state == respio.TxCmdStateBegin {
-			sessionPair.backend.UpdateTxnState(id, state)
-		} else {
-			sessionPair.backend.UpdateTxnState("", state)
-		}
+		currSession := sessionPair.session
+		sessionPair.backend.UpdateTxnState(currSession, state)
 	}
+
 	reqCtx := RequestContext{
 		Session:  sessionPair.session,
 		Request:  packet,
